@@ -1,3 +1,4 @@
+# Dinx Leads Sync
 
 Worker para importar leads do novo formulario Meta para a API Dinx, com regras de elegibilidade, DE/PARA de campos, limpeza de telefone, controle anti-duplicidade e dashboard operacional.
 
