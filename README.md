@@ -20,19 +20,6 @@ O worker aguarda `SEND_DELAY_SECONDS` entre tentativas de envio para evitar rate
 
 Configure no Railway:
 
-```text
-META_PAGE_TOKEN
-META_PAGE_ID
-META_FORM_ID=1696556268158303
-META_WEBHOOK_VERIFY_TOKEN
-DINX_URL=https://bff.prd.dinx.app/site.beta_access.v1.SiteBetaAccessService/RequestPartnerBetaAccess
-DINX_API_KEY
-INTERVAL_MINUTES=30
-SEND_DELAY_SECONDS=4
-REDIS_URL
-SAVE_REJECTED_FILE=0
-SKIP_INVALID_LEADS=1
-```
 
 ## Tempo real via Webhook Meta
 
