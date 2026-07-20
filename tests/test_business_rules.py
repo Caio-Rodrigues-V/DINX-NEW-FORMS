@@ -20,9 +20,17 @@ class BusinessRulesTest(unittest.TestCase):
         self.assertEqual(map_age_tier("De 7 a 12 anos"), "between7and12")
         self.assertEqual(map_age_tier("Ambas as idades"), "both")
 
+    def test_maps_form_v5_age_variations(self):
+        self.assertEqual(map_age_tier("Tenho filhos de 3 a 6 anos"), "between3and6")
+        self.assertEqual(map_age_tier("Tenho filho de 7 a 12 anos"), "between7and12")
+        self.assertEqual(map_age_tier("Tenho filhos nas duas faixas"), "both")
+        self.assertEqual(map_age_tier("Criancas com idade entre 3 e 6"), "between3and6")
+
     def test_filters_no_children_from_either_question(self):
         self.assertTrue(no_children_selected("Não tenho filho(a)"))
         self.assertTrue(no_children_selected("De 3 a 6 anos", "Não tenho filho(a)"))
+        self.assertTrue(no_children_selected("Nao tenho filhos nessa idade"))
+        self.assertTrue(no_children_selected("Sem filhos"))
         self.assertFalse(no_children_selected("De 3 a 6 anos", "Escola particular"))
 
     def test_maps_school_answers_without_dangerous_default(self):
