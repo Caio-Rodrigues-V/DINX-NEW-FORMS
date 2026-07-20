@@ -19,6 +19,7 @@ SEEN_REDIS_KEY = "dinx:seen_leads"
 SENT_DETAIL_REDIS_KEY = "dinx:sent_leads"
 REJECTED_REDIS_KEY = "dinx:rejected_leads"
 INVALID_REDIS_KEY = "dinx:invalid_leads"
+FILTERED_REDIS_KEY = "dinx:filtered_leads"
 META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "")
 
 app = Flask(__name__)
@@ -131,6 +132,7 @@ def load_sent_records(limit=None):
             {
                 "lead_id": record.get("lead_id", lead_id),
                 "status": record.get("status", ""),
+                "decision": record.get("decision", "accepted"),
                 "phone_digits": record.get("phone_digits", ""),
                 "created_at": record.get("created_at", ""),
                 "response": record.get("response", ""),
@@ -194,10 +196,11 @@ def dashboard():
             "sent": safe_count(client, SEEN_REDIS_KEY),
             "rejected": safe_count(client, REJECTED_REDIS_KEY),
             "invalid": safe_count(client, INVALID_REDIS_KEY),
+            "filtered": safe_count(client, FILTERED_REDIS_KEY),
         }
     except redis.RedisError:
         app.logger.exception("Erro ao carregar contadores do Redis")
-        stats = {"sent": 0, "rejected": 0, "invalid": 0}
+        stats = {"sent": 0, "rejected": 0, "invalid": 0, "filtered": 0}
 
     try:
         records = load_rejected_records(limit=100)
@@ -287,7 +290,7 @@ DASHBOARD_HTML = """
     h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: 0; }
     main { padding: 24px 28px 40px; max-width: 1280px; margin: 0 auto; }
     .muted { color: var(--muted); }
-    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -388,6 +391,7 @@ DASHBOARD_HTML = """
       <div class="stat"><span>Enviados</span><strong>{{ stats.sent }}</strong></div>
       <div class="stat"><span>Rejeitados</span><strong>{{ stats.rejected }}</strong></div>
       <div class="stat"><span>Invalidos</span><strong>{{ stats.invalid }}</strong></div>
+      <div class="stat"><span>Filtrados pela regra</span><strong>{{ stats.filtered }}</strong></div>
     </section>
 
     <section class="config" aria-label="Configuracao">
@@ -408,6 +412,7 @@ DASHBOARD_HTML = """
         <tr>
           <th>Lead ID</th>
           <th>Status HTTP</th>
+          <th>Decisao</th>
           <th>Telefone</th>
           <th>Data</th>
           <th>Resposta Dinx</th>
@@ -418,6 +423,7 @@ DASHBOARD_HTML = """
         <tr>
           <td>{{ record.lead_id }}</td>
           <td><span class="badge">{{ record.status }}</span></td>
+          <td><span class="badge">{{ record.decision }}</span></td>
           <td>{{ record.phone_digits }}</td>
           <td>{{ record.created_at }}</td>
           <td>{{ escape(record.response) }}</td>

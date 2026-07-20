@@ -7,6 +7,17 @@ import schedule
 import redis
 from dotenv import load_dotenv
 
+from business_rules import (
+    INCOME_NOT_INFORMED,
+    META_ORIGIN,
+    children_count_for_tier,
+    map_age_tier,
+    map_school_type,
+    no_children_selected,
+    normalize_choice,
+    terminal_business_error,
+)
+
 load_dotenv()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -33,13 +44,13 @@ REDIS_KEY        = "dinx:seen_leads"
 SENT_DETAIL_REDIS_KEY = "dinx:sent_leads"
 REJECTED_REDIS_KEY = "dinx:rejected_leads"
 INVALID_REDIS_KEY = "dinx:invalid_leads"
+FILTERED_REDIS_KEY = "dinx:filtered_leads"
 REJECTED_LEADS_FILE = os.getenv("REJECTED_LEADS_FILE", "rejected_leads.jsonl")
 SAVE_REJECTED_FILE = os.getenv("SAVE_REJECTED_FILE", "0") == "1"
 SKIP_INVALID_LEADS = os.getenv("SKIP_INVALID_LEADS", "1") == "1"
 
 AGE_FIELD = "qual_é_a_idade_do_seu_filho?_"
 SCHOOL_FIELD = "seu(s)_filho(s)_estuda(m)_em_qual_tipo_de_escola?"
-INCOME_FIELD = "em_qual_faixa_se_encaixa_aproximadamente_a_renda_familiar_mensal_da_sua_casa?__(é_confidencial_e_ajuda_a_personalizar_sua_experiência)"
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
@@ -51,9 +62,17 @@ def mark_seen(lead_id: str):
     redis_client.sadd(REDIS_KEY, lead_id)
 
 def save_sent_lead(lead_id: str, lead: dict, status, response_text: str):
+    try:
+        response_body = json.loads(response_text) if response_text else {}
+    except (TypeError, json.JSONDecodeError):
+        response_body = {}
+    approved = response_body.get("approved")
+    decision = "approved" if approved is True else "pending" if approved is False else "accepted"
     record = {
         "lead_id": lead_id,
         "status": status,
+        "approved": approved,
+        "decision": decision,
         "response": response_text[:1000] if response_text else "",
         "phone_digits": lead.get("phone", ""),
         "payload": mask_payload(lead),
@@ -68,6 +87,21 @@ def is_invalid(lead_id: str) -> bool:
 
 def mark_invalid(lead_id: str):
     redis_client.sadd(INVALID_REDIS_KEY, lead_id)
+
+def is_filtered(lead_id: str) -> bool:
+    return redis_client.sismember(FILTERED_REDIS_KEY, lead_id)
+
+def save_filtered_lead(lead_id: str, reason: str):
+    record = {
+        "lead_id": lead_id,
+        "reason": reason,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    redis_client.sadd(FILTERED_REDIS_KEY, lead_id)
+    redis_client.set(
+        f"dinx:filtered_lead:{lead_id}",
+        json.dumps(record, ensure_ascii=False),
+    )
 
 def normalize_phone(raw_phone: str) -> str:
     digits = "".join(c for c in str(raw_phone or "") if c.isdigit())
@@ -108,11 +142,11 @@ def first_field(fields: dict, names: list[str], default: str = "") -> str:
     return default
 
 def find_field_by_key(fields: dict, keys: list[str], default: str = "") -> str:
-    normalized_keys = [key.lower() for key in keys]
+    normalized_keys = [normalize_choice(key) for key in keys]
     for name, value in fields.items():
         if not value:
             continue
-        normalized_name = str(name).lower()
+        normalized_name = normalize_choice(name)
         if any(key in normalized_name for key in normalized_keys):
             return str(value)
     return default
@@ -130,6 +164,10 @@ def extract_rejection_reason(response_text: str) -> list:
         message = debug.get("message")
         if field or message:
             reasons.append({"field": field, "message": message})
+    if not reasons:
+        message = data.get("error") or data.get("message")
+        if message:
+            reasons.append({"field": data.get("field", ""), "message": str(message)})
     return reasons
 
 def save_rejected_lead(lead_id: str, lead: dict, status, response_text: str):
@@ -150,50 +188,12 @@ def save_rejected_lead(lead_id: str, lead: dict, status, response_text: str):
         with open(REJECTED_LEADS_FILE, "a", encoding="utf-8") as file:
             file.write(record_json + "\n")
 
-# ── Mapeamento Meta → Dinx ────────────────────────────────────────────────────
-# ATENÇÃO: ajuste as chaves conforme os valores reais retornados pelo formulário Meta
-CHILDREN_AGE_MAP = {
-    "de_3_a_6_anos":          "between3and6",
-    "entre 3 e 6 anos":       "between3and6",
-    "sim, entre 3 e 6 anos":  "between3and6",
-    "de_7_a_12_anos":         "between7and12",
-    "entre 7 e 12 anos":      "between7and12",
-    "sim, entre 7 e 12 anos": "between7and12",
-    "ambas_as_idades":        "both",
-    "ambos":                  "both",
-    "sim, ambos":             "both",
-    "nenhum":                 "none",
-    "não tenho filhos":       "none",
-}
-
-INCOME_MAP = {
-    "acima_de_r$_3.600,00/mês": "between4kAnd12k",
-    "abaixo_de_r$_3.600,00":    "under2k",
-    "acima de 25k":       "over25k",
-    "acima de r$25.000":  "over25k",
-    "entre 12k e 25k":    "between12kAnd25k",
-    "entre 4k e 12k":     "between4kAnd12k",
-    "entre 2k e 4k":      "between2kAnd4k",
-    "abaixo de 2k":       "under2k",
-    "não informado":      "notInformed",
-}
-
 DEVICE_MAP = {
     "ios":      "ios",
     "iphone":   "ios",
     "android":  "android",
     "outro":    "other",
     "other":    "other",
-}
-
-SCHOOL_MAP = {
-    "escola_pública":  1,
-    "escola_publica":  1,
-    "escola_particular": 2,
-    "pública":  1,
-    "publica":  1,
-    "privada":  2,
-    "particular": 2,
 }
 
 # ── Meta API ──────────────────────────────────────────────────────────────────
@@ -251,12 +251,41 @@ def fetch_lead(lead_id: str) -> dict | None:
         log.error("Erro ao buscar lead Meta. lead_id=%s status=%s body=%s", lead_id, status, body)
         return None
 
+def extract_fields(raw: dict) -> dict:
+    return {
+        item["name"]: item["values"][0] if item.get("values") else ""
+        for item in raw.get("field_data", [])
+        if item.get("name")
+    }
+
+def extract_business_answers(fields: dict) -> tuple[str, str]:
+    age_raw = first_field(
+        fields,
+        [
+            AGE_FIELD,
+            "qual_é_a_idade_do_seu_filho?",
+            "qual_e_a_idade_do_seu_filho?",
+            "idade_dos_filhos",
+        ],
+    )
+    if not age_raw:
+        age_raw = find_field_by_key(fields, ["idade do seu filho", "idade dos filhos"])
+
+    school_raw = first_field(
+        fields,
+        [
+            SCHOOL_FIELD,
+            "seus filhos estudam em qual tipo de escola?",
+            "tipo_de_escola",
+        ],
+    )
+    if not school_raw:
+        school_raw = find_field_by_key(fields, ["tipo de escola", "qual tipo de escola"])
+    return age_raw.strip(), school_raw.strip()
+
 def parse_lead(raw: dict) -> dict:
     """Converte lead da Meta para payload da Dinx."""
-    fields = {
-        item["name"]: item["values"][0] if item["values"] else ""
-        for item in raw.get("field_data", [])
-    }
+    fields = extract_fields(raw)
 
     # Log dos campos brutos para debug/ajuste do mapeamento
     log.debug(f"Campos brutos: {fields}")
@@ -296,24 +325,21 @@ def parse_lead(raw: dict) -> dict:
         phone = find_field_by_key(fields, ["phone", "telefone", "celular", "whatsapp"])
     phone = normalize_phone(phone)
 
-    children_age_raw = fields.get(AGE_FIELD, fields.get("idade_dos_filhos", "")).lower().strip()
-    income_raw       = fields.get(INCOME_FIELD, fields.get("renda", "")).lower().strip()
+    children_age_raw, school_raw = extract_business_answers(fields)
     device_raw       = fields.get("tipo_de_device", fields.get("device_type", "")).lower().strip()
-    school_raw       = fields.get(SCHOOL_FIELD, fields.get("tipo_de_escola", "")).lower().strip()
-    children_count   = int(fields.get("filhos", fields.get("children_count", 1 if children_age_raw else 0)) or 0)
-    if children_age_raw == "ambas_as_idades":
-        children_count = max(children_count, 2)
+    age_tier         = map_age_tier(children_age_raw)
+    school_type      = map_school_type(school_raw)
 
     return {
         "name":                      name,
         "email":                     email,
         "phone":                     phone,
-        "children_count":            children_count,
-        "children_between_age_tier": map_value(CHILDREN_AGE_MAP, children_age_raw, "none", "children_between_age_tier"),
-        "income_range":              map_value(INCOME_MAP, income_raw, "notInformed", "income_range"),
+        "children_count":            children_count_for_tier(age_tier),
+        "children_between_age_tier": age_tier,
+        "income_range":              INCOME_NOT_INFORMED,
         "device_type":               map_value(DEVICE_MAP, device_raw, "empty", "device_type") if device_raw else "empty",
-        "school_type":               map_value(SCHOOL_MAP, school_raw, 1, "school_type"),
-        "origin":                    "META",
+        "school_type":               school_type,
+        "origin":                    META_ORIGIN,
     }
 
 # ── Dinx API ──────────────────────────────────────────────────────────────────
@@ -323,6 +349,10 @@ def send_to_dinx(lead: dict, lead_id: str) -> bool:
         local_errors.append({"field": "name", "message": "Nome ausente ou menor que 3 caracteres"})
     if len(str(lead.get("phone") or "")) < 10:
         local_errors.append({"field": "phone", "message": "Telefone ausente ou incompleto"})
+    if not lead.get("children_between_age_tier"):
+        local_errors.append({"field": "children_between_age_tier", "message": "Faixa etária ausente ou não reconhecida"})
+    if lead.get("school_type") not in (1, 2):
+        local_errors.append({"field": "school_type", "message": "Tipo de escola ausente ou não reconhecido"})
     if local_errors:
         response_text = json.dumps(
             {
@@ -359,6 +389,9 @@ def send_to_dinx(lead: dict, lead_id: str) -> bool:
 
             if body.get("success") is False:
                 save_rejected_lead(lead_id, lead, "business_error", r.text)
+                error_message = str(body.get("error") or body.get("message") or "")
+                if terminal_business_error(error_message):
+                    mark_invalid(lead_id)
                 log.warning(
                     "Dinx retornou erro de negocio para lead %s: %s | payload=%s",
                     lead_id,
@@ -397,8 +430,19 @@ def process_raw_lead(raw: dict) -> bool:
     if is_seen(lead_id):
         log.info("Lead %s ignorado: ja enviado", lead_id)
         return False
+    if is_filtered(lead_id):
+        log.info("Lead %s ignorado: filtrado pela regra de negocio", lead_id)
+        return False
     if SKIP_INVALID_LEADS and is_invalid(lead_id):
         log.info("Lead %s ignorado: ja marcado como invalido", lead_id)
+        return False
+
+    fields = extract_fields(raw)
+    children_age_raw, school_raw = extract_business_answers(fields)
+    if no_children_selected(children_age_raw, school_raw):
+        reason = "Lead sem filhos entre 3 e 12 anos; não enviado para a Dinx"
+        save_filtered_lead(lead_id, reason)
+        log.info("Lead %s filtrado pela regra de negocio: %s", lead_id, reason)
         return False
 
     lead = parse_lead(raw)
