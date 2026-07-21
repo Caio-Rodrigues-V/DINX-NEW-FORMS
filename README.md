@@ -136,6 +136,29 @@ Leads que responderam `Nao tenho filho(a)` entram apenas em `dinx:filtered_leads
 
 Por padrao, `SKIP_INVALID_LEADS=1`, entao leads marcados como invalidos nao sao reenviados em ciclos futuros. Se precisar reprocessar invalidos depois de ajustar a normalizacao, use `SKIP_INVALID_LEADS=0` temporariamente.
 
+### Reprocessar o erro 400 temporario de school_type
+
+O comando abaixo seleciona exclusivamente registros com status `400` e a mensagem de falha de decodificacao de `school_type`. Por padrao ele apenas simula, sem enviar:
+
+```bash
+python reprocess_school_type_400.py
+```
+
+Para testar apenas um lead e depois confirmar seu envio:
+
+```bash
+python reprocess_school_type_400.py --lead-id LEAD_ID
+python reprocess_school_type_400.py --lead-id LEAD_ID --send
+```
+
+Depois da validacao do primeiro lead, reenvie os demais com pausa entre requisicoes:
+
+```bash
+python reprocess_school_type_400.py --send --delay 4
+```
+
+Quando a Dinx aceita o lead, o script registra o envio, remove o erro antigo das listas de rejeitados e invalidos e apaga o detalhe antigo. Outros erros `400`, validacoes locais e erros de negocio nao entram nesse reprocessamento.
+
 ## Dashboard
 
 Rotas:
