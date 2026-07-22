@@ -169,6 +169,17 @@ GET /rejected.csv
 GET /health
 ```
 
+O dashboard abre filtrado no dia de hoje, considerando o horario de Brasilia. O seletor permite consultar outra data ou todo o periodo. Os cards e as tabelas acompanham o periodo selecionado.
+
+Nos envios aceitos pela Dinx:
+
+```text
+approved=true -> Aprovados
+approved=false -> Qualificados
+```
+
+O CSV de rejeitados tambem respeita o filtro de data ativo no dashboard.
+
 ## Validacao da API Dev
 
 O probe usa dados ficticios, bloqueia qualquer host diferente de `bff.dev.dinx.app` e compara os retornos esperados para escola particular e publica.

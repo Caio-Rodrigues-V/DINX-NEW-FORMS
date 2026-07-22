@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+from datetime import datetime
 from threading import Thread
 from html import escape
 
@@ -10,6 +11,12 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template_string, request
 
 import main as lead_sync
+from dashboard_metrics import (
+    DASHBOARD_TIMEZONE,
+    calculate_stats,
+    filter_records_by_date,
+    resolve_date_filter,
+)
 
 
 load_dotenv()
@@ -45,6 +52,13 @@ def safe_count(client, key):
         return 0
 
 
+def safe_members(client, key):
+    try:
+        return set(client.smembers(key))
+    except redis.RedisError:
+        return set()
+
+
 def first_reason(record):
     reasons = record.get("reasons") or []
     if not reasons:
@@ -59,11 +73,7 @@ def load_rejected_records(limit=None):
 
     try:
         lead_ids_iter = client.sscan_iter(REJECTED_REDIS_KEY, count=200)
-        lead_ids = []
-        for lead_id in lead_ids_iter:
-            lead_ids.append(lead_id)
-            if limit and len(lead_ids) >= limit:
-                break
+        lead_ids = list(lead_ids_iter)
     except redis.RedisError:
         app.logger.exception("Erro ao listar leads rejeitados no Redis")
         return []
@@ -109,11 +119,7 @@ def load_sent_records(limit=None):
 
     try:
         lead_ids_iter = client.sscan_iter(SENT_DETAIL_REDIS_KEY, count=200)
-        lead_ids = []
-        for lead_id in lead_ids_iter:
-            lead_ids.append(lead_id)
-            if limit and len(lead_ids) >= limit:
-                break
+        lead_ids = list(lead_ids_iter)
     except redis.RedisError:
         app.logger.exception("Erro ao listar leads enviados no Redis")
         return []
@@ -128,14 +134,55 @@ def load_sent_records(limit=None):
             app.logger.exception("Erro ao carregar lead enviado %s", lead_id)
             continue
 
+        decision = record.get("decision")
+        if not decision:
+            approved = record.get("approved")
+            decision = "approved" if approved is True else "pending" if approved is False else "accepted"
         records.append(
             {
                 "lead_id": record.get("lead_id", lead_id),
                 "status": record.get("status", ""),
-                "decision": record.get("decision", "accepted"),
+                "decision": decision,
+                "decision_label": {
+                    "approved": "Aprovado",
+                    "pending": "Qualificado",
+                    "accepted": "Aceito",
+                }.get(decision, decision),
                 "phone_digits": record.get("phone_digits", ""),
                 "created_at": record.get("created_at", ""),
                 "response": record.get("response", ""),
+            }
+        )
+
+    records.sort(key=lambda row: row.get("created_at") or "", reverse=True)
+    return records[:limit] if limit else records
+
+
+def load_filtered_records(limit=None):
+    client = redis_client()
+    records = []
+
+    try:
+        lead_ids = list(client.sscan_iter(FILTERED_REDIS_KEY, count=200))
+    except redis.RedisError:
+        app.logger.exception("Erro ao listar leads filtrados no Redis")
+        return []
+
+    for lead_id in lead_ids:
+        try:
+            raw = client.get(f"dinx:filtered_lead:{lead_id}")
+            if not raw:
+                continue
+            record = json.loads(raw)
+        except (redis.RedisError, json.JSONDecodeError):
+            app.logger.exception("Erro ao carregar lead filtrado %s", lead_id)
+            continue
+
+        records.append(
+            {
+                "lead_id": record.get("lead_id", lead_id),
+                "reason": record.get("reason", ""),
+                "created_at": record.get("created_at", ""),
             }
         )
 
@@ -190,28 +237,43 @@ def meta_webhook_receive():
 
 @app.get("/")
 def dashboard():
-    try:
-        client = redis_client()
-        stats = {
-            "sent": safe_count(client, SEEN_REDIS_KEY),
-            "rejected": safe_count(client, REJECTED_REDIS_KEY),
-            "invalid": safe_count(client, INVALID_REDIS_KEY),
-            "filtered": safe_count(client, FILTERED_REDIS_KEY),
-        }
-    except redis.RedisError:
-        app.logger.exception("Erro ao carregar contadores do Redis")
-        stats = {"sent": 0, "rejected": 0, "invalid": 0, "filtered": 0}
+    selected_date, filter_value, period_label = resolve_date_filter(request.args.get("date"))
+    today_value = datetime.now(DASHBOARD_TIMEZONE).date().isoformat()
 
     try:
-        records = load_rejected_records(limit=100)
+        client = redis_client()
+        invalid_ids = safe_members(client, INVALID_REDIS_KEY)
+    except redis.RedisError:
+        app.logger.exception("Erro ao carregar contadores do Redis")
+        invalid_ids = set()
+
+    try:
+        all_rejected_records = load_rejected_records()
     except Exception:
         app.logger.exception("Erro ao carregar lista de leads rejeitados")
-        records = []
+        all_rejected_records = []
     try:
-        sent_records = load_sent_records(limit=25)
+        all_sent_records = load_sent_records()
     except Exception:
         app.logger.exception("Erro ao carregar lista de leads enviados")
-        sent_records = []
+        all_sent_records = []
+    try:
+        all_filtered_records = load_filtered_records()
+    except Exception:
+        app.logger.exception("Erro ao carregar lista de leads filtrados")
+        all_filtered_records = []
+
+    filtered_sent_records = filter_records_by_date(all_sent_records, selected_date)
+    filtered_rejected_records = filter_records_by_date(all_rejected_records, selected_date)
+    filtered_rule_records = filter_records_by_date(all_filtered_records, selected_date)
+    stats = calculate_stats(
+        filtered_sent_records,
+        filtered_rejected_records,
+        invalid_ids,
+        filtered_rule_records,
+    )
+    records = filtered_rejected_records[:100]
+    sent_records = filtered_sent_records[:25]
     config = masked_config()
 
     return render_template_string(
@@ -221,12 +283,18 @@ def dashboard():
         sent_records=sent_records,
         config=config,
         escape=escape,
+        filter_value=filter_value,
+        period_label=period_label,
+        today_value=today_value,
     )
 
 
 @app.get("/rejected.csv")
 def rejected_csv():
-    records = load_rejected_records()
+    selected_date, filter_value, _period_label = resolve_date_filter(
+        request.args.get("date", "all")
+    )
+    records = filter_records_by_date(load_rejected_records(), selected_date)
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
@@ -240,7 +308,11 @@ def rejected_csv():
     return Response(
         data,
         mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=rejected_leads.csv"},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=rejected_leads_{filter_value}.csv"
+            )
+        },
     )
 
 
@@ -290,7 +362,7 @@ DASHBOARD_HTML = """
     h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: 0; }
     main { padding: 24px 28px 40px; max-width: 1280px; margin: 0 auto; }
     .muted { color: var(--muted); }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .stat {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -299,6 +371,31 @@ DASHBOARD_HTML = """
     }
     .stat span { color: var(--muted); display: block; margin-bottom: 8px; }
     .stat strong { font-size: 28px; line-height: 1; }
+    .stat.approved { border-left: 4px solid #15803d; }
+    .stat.qualified { border-left: 4px solid #2563eb; }
+    .filter-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .filter-panel form, .quick-filters { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+    .filter-panel label { color: var(--muted); display: grid; gap: 5px; }
+    .filter-panel input, .filter-panel button {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: white;
+      color: var(--text);
+      padding: 8px 10px;
+      font: inherit;
+    }
+    .filter-panel button { background: var(--accent); color: white; border-color: var(--accent); cursor: pointer; font-weight: 600; }
+    .quick-filters a { color: var(--accent); text-decoration: none; font-weight: 600; padding: 8px 4px; }
     .toolbar {
       display: flex;
       justify-content: space-between;
@@ -373,7 +470,7 @@ DASHBOARD_HTML = """
       header { align-items: flex-start; flex-direction: column; }
       main { padding: 18px 14px 32px; }
       .grid, .config { grid-template-columns: 1fr; }
-      .toolbar { align-items: flex-start; flex-direction: column; }
+      .toolbar, .filter-panel { align-items: flex-start; flex-direction: column; }
       table { display: block; overflow-x: auto; white-space: nowrap; }
     }
   </style>
@@ -384,11 +481,28 @@ DASHBOARD_HTML = """
       <h1>Dinx Leads Sync</h1>
       <div class="muted">Monitoramento de importacao e rejeicoes</div>
     </div>
-    <a class="button" href="/rejected.csv">Baixar rejeitados CSV</a>
+    <a class="button" href="/rejected.csv?date={{ filter_value }}">Baixar rejeitados CSV</a>
   </header>
   <main>
+    <section class="filter-panel" aria-label="Filtro por data">
+      <form method="get" action="/">
+        <label>
+          Filtrar por dia
+          <input type="date" name="date" value="{{ '' if filter_value == 'all' else filter_value }}">
+        </label>
+        <button type="submit">Aplicar filtro</button>
+      </form>
+      <div class="quick-filters">
+        <span class="muted">Periodo: <strong>{{ period_label }}</strong></span>
+        <a href="/?date={{ today_value }}">Hoje</a>
+        <a href="/?date=all">Todo o periodo</a>
+      </div>
+    </section>
+
     <section class="grid" aria-label="Resumo">
       <div class="stat"><span>Enviados</span><strong>{{ stats.sent }}</strong></div>
+      <div class="stat approved"><span>Aprovados</span><strong>{{ stats.approved }}</strong></div>
+      <div class="stat qualified"><span>Qualificados</span><strong>{{ stats.qualified }}</strong></div>
       <div class="stat"><span>Rejeitados</span><strong>{{ stats.rejected }}</strong></div>
       <div class="stat"><span>Invalidos</span><strong>{{ stats.invalid }}</strong></div>
       <div class="stat"><span>Filtrados pela regra</span><strong>{{ stats.filtered }}</strong></div>
@@ -423,7 +537,7 @@ DASHBOARD_HTML = """
         <tr>
           <td>{{ record.lead_id }}</td>
           <td><span class="badge">{{ record.status }}</span></td>
-          <td><span class="badge">{{ record.decision }}</span></td>
+          <td><span class="badge">{{ record.decision_label }}</span></td>
           <td>{{ record.phone_digits }}</td>
           <td>{{ record.created_at }}</td>
           <td>{{ escape(record.response) }}</td>
