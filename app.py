@@ -243,9 +243,11 @@ def dashboard():
     try:
         client = redis_client()
         invalid_ids = safe_members(client, INVALID_REDIS_KEY)
+        total_sent = safe_count(client, SEEN_REDIS_KEY)
     except redis.RedisError:
         app.logger.exception("Erro ao carregar contadores do Redis")
         invalid_ids = set()
+        total_sent = 0
 
     try:
         all_rejected_records = load_rejected_records()
@@ -271,6 +273,7 @@ def dashboard():
         filtered_rejected_records,
         invalid_ids,
         filtered_rule_records,
+        total_sent=total_sent,
     )
     records = filtered_rejected_records[:100]
     sent_records = filtered_sent_records[:25]
@@ -500,7 +503,8 @@ DASHBOARD_HTML = """
     </section>
 
     <section class="grid" aria-label="Resumo">
-      <div class="stat"><span>Enviados</span><strong>{{ stats.sent }}</strong></div>
+      <div class="stat"><span>Total enviados</span><strong>{{ stats.total_sent }}</strong></div>
+      <div class="stat"><span>Enviados no periodo</span><strong>{{ stats.sent }}</strong></div>
       <div class="stat approved"><span>Aprovados</span><strong>{{ stats.approved }}</strong></div>
       <div class="stat qualified"><span>Qualificados</span><strong>{{ stats.qualified }}</strong></div>
       <div class="stat"><span>Rejeitados</span><strong>{{ stats.rejected }}</strong></div>

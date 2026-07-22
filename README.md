@@ -171,6 +171,8 @@ GET /health
 
 O dashboard abre filtrado no dia de hoje, considerando o horario de Brasilia. O seletor permite consultar outra data ou todo o periodo. Os cards e as tabelas acompanham o periodo selecionado.
 
+O card `Total enviados` mostra o acumulado geral e nao muda com o filtro. O card `Enviados no periodo` acompanha a data selecionada.
+
 Nos envios aceitos pela Dinx:
 
 ```text

@@ -46,8 +46,15 @@ def filter_records_by_date(records, selected_date):
     return filtered
 
 
-def calculate_stats(sent_records, rejected_records, invalid_ids, filtered_records):
+def calculate_stats(
+    sent_records,
+    rejected_records,
+    invalid_ids,
+    filtered_records,
+    total_sent=None,
+):
     return {
+        "total_sent": len(sent_records) if total_sent is None else total_sent,
         "sent": len(sent_records),
         "approved": sum(record.get("decision") == "approved" for record in sent_records),
         "qualified": sum(record.get("decision") == "pending" for record in sent_records),

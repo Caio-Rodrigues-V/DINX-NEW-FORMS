@@ -39,11 +39,13 @@ class DashboardFiltersTest(unittest.TestCase):
             rejected_records,
             {"5"},
             [{"lead_id": "6"}],
+            total_sent=257,
         )
 
         self.assertEqual(
             stats,
             {
+                "total_sent": 257,
                 "sent": 3,
                 "approved": 1,
                 "qualified": 1,
