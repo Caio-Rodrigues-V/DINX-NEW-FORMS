@@ -1,6 +1,5 @@
 import csv
 import io
-import json
 import os
 from datetime import datetime
 from threading import Thread
@@ -17,6 +16,7 @@ from dashboard_metrics import (
     filter_records_by_date,
     resolve_date_filter,
 )
+from redis_batch import load_json_details
 
 
 load_dotenv()
@@ -74,27 +74,27 @@ def load_rejected_records(limit=None):
     try:
         lead_ids_iter = client.sscan_iter(REJECTED_REDIS_KEY, count=200)
         lead_ids = list(lead_ids_iter)
+        details, invalid_json_ids = load_json_details(
+            client,
+            lead_ids,
+            "dinx:rejected_lead:",
+        )
     except redis.RedisError:
         app.logger.exception("Erro ao listar leads rejeitados no Redis")
         return []
 
+    for lead_id in invalid_json_ids:
+        app.logger.warning("Detalhe de lead rejeitado invalido no Redis: %s", lead_id)
+
     for lead_id in lead_ids:
-        try:
-            raw = client.get(f"dinx:rejected_lead:{lead_id}")
-            if raw:
-                record = json.loads(raw)
-            else:
-                record = {
-                    "lead_id": lead_id,
-                    "status": "",
-                    "phone_digits": "",
-                    "created_at": "",
-                    "response": "",
-                    "reasons": [{"field": "", "message": "Detalhe nao encontrado no Redis"}],
-                }
-        except (redis.RedisError, json.JSONDecodeError):
-            app.logger.exception("Erro ao carregar lead rejeitado %s", lead_id)
-            continue
+        record = details.get(lead_id) or {
+            "lead_id": lead_id,
+            "status": "",
+            "phone_digits": "",
+            "created_at": "",
+            "response": "",
+            "reasons": [{"field": "", "message": "Detalhe nao encontrado no Redis"}],
+        }
 
         field, message = first_reason(record)
         records.append(
@@ -120,18 +120,21 @@ def load_sent_records(limit=None):
     try:
         lead_ids_iter = client.sscan_iter(SENT_DETAIL_REDIS_KEY, count=200)
         lead_ids = list(lead_ids_iter)
+        details, invalid_json_ids = load_json_details(
+            client,
+            lead_ids,
+            "dinx:sent_lead:",
+        )
     except redis.RedisError:
         app.logger.exception("Erro ao listar leads enviados no Redis")
         return []
 
+    for lead_id in invalid_json_ids:
+        app.logger.warning("Detalhe de lead enviado invalido no Redis: %s", lead_id)
+
     for lead_id in lead_ids:
-        try:
-            raw = client.get(f"dinx:sent_lead:{lead_id}")
-            if not raw:
-                continue
-            record = json.loads(raw)
-        except (redis.RedisError, json.JSONDecodeError):
-            app.logger.exception("Erro ao carregar lead enviado %s", lead_id)
+        record = details.get(lead_id)
+        if not record:
             continue
 
         decision = record.get("decision")
@@ -164,18 +167,21 @@ def load_filtered_records(limit=None):
 
     try:
         lead_ids = list(client.sscan_iter(FILTERED_REDIS_KEY, count=200))
+        details, invalid_json_ids = load_json_details(
+            client,
+            lead_ids,
+            "dinx:filtered_lead:",
+        )
     except redis.RedisError:
         app.logger.exception("Erro ao listar leads filtrados no Redis")
         return []
 
+    for lead_id in invalid_json_ids:
+        app.logger.warning("Detalhe de lead filtrado invalido no Redis: %s", lead_id)
+
     for lead_id in lead_ids:
-        try:
-            raw = client.get(f"dinx:filtered_lead:{lead_id}")
-            if not raw:
-                continue
-            record = json.loads(raw)
-        except (redis.RedisError, json.JSONDecodeError):
-            app.logger.exception("Erro ao carregar lead filtrado %s", lead_id)
+        record = details.get(lead_id)
+        if not record:
             continue
 
         records.append(
